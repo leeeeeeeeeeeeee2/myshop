@@ -1,45 +1,79 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+const initSqlJs = require('sql.js');
 const fs = require('fs');
+const path = require('path');
 
-// Ensure data directory exists
-const dataDir = path.join(__dirname, 'data');
+let db = null;
+const dbPath = path.join(__dirname, 'data', 'myshop.db');
+
+const dataDir = path.dirname(dbPath);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
   console.log('Created data directory');
 }
 
-// Database file path
-const dbPath = path.join(dataDir, 'myshop.db');
-console.log('Database path:', dbPath);
+async function initDb() {
+  const SQL = await initSqlJs();
+  
+  if (fs.existsSync(dbPath)) {
+    const buffer = fs.readFileSync(dbPath);
+    db = new SQL.Database(buffer);
+    console.log('Loaded existing database');
+  } else {
+    db = new SQL.Database();
+    console.log('Created new database');
+  }
+  
+  return db;
+}
 
-// Create/open database
-const db = new Database(dbPath, {
-  verbose: console.log
+function saveDb() {
+  if (!db) return;
+  const data = db.export();
+  const buffer = Buffer.from(data);
+  fs.writeFileSync(dbPath, buffer);
+}
+
+setInterval(saveDb, 5000);
+
+process.on('exit', saveDb);
+process.on('SIGINT', () => {
+  saveDb();
+  process.exit(0);
 });
 
-// Enable foreign keys
-db.pragma('foreign_keys = ON');
-
-// Enable WAL mode for better performance
-db.pragma('journal_mode = WAL');
-
-console.log('✓ SQLite database connected');
-
-// Helper function for queries
 const query = (sql, params = []) => {
+  if (!db) {
+    throw new Error('Database not initialized');
+  }
+
   try {
-    const stmt = db.prepare(sql);
-    
     if (sql.trim().toUpperCase().startsWith('SELECT')) {
-      return { rows: stmt.all(params) };
+      const result = db.exec(sql, params);
+      if (result.length === 0) {
+        return { rows: [] };
+      }
+      const columns = result[0].columns;
+      const values = result[0].values;
+      const rows = values.map(row => {
+        const obj = {};
+        columns.forEach((col, i) => {
+          obj[col] = row[i];
+        });
+        return obj;
+      });
+      return { rows };
+    } else {
+      db.run(sql, params);
+      saveDb();
+      
+      if (sql.trim().toUpperCase().startsWith('INSERT')) {
+        const lastIdResult = db.exec('SELECT last_insert_rowid() as id');
+        const lastId = lastIdResult[0].values[0][0];
+        return { rows: [{ id: lastId }], changes: 1 };
+      }
+      
+      return { rows: [], changes: db.getRowsModified() };
     }
-    
-    const result = stmt.run(params);
-    return { 
-      rows: result.changes > 0 ? [{ id: result.lastInsertRowid }] : [],
-      changes: result.changes
-    };
   } catch (error) {
     console.error('Database query error:', error);
     throw error;
@@ -47,6 +81,9 @@ const query = (sql, params = []) => {
 };
 
 module.exports = {
+  initDb,
   query,
+  saveDb
+};
   db
 };
